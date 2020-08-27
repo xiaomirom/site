@@ -1,0 +1,74 @@
+name: Build Site
+
+on:
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-18.04
+
+    steps:
+      # - uses: actions/checkout@v2
+      #   with:
+      #     persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal token
+      #     fetch-depth: 1
+      #     repository: ${{ secrets.GENERATOR_SOURCE }}
+      #     token: ${{ secrets.GENERATOR_PAT }}
+      #     ref: master
+      #     #submodules: recursive
+      - name: Set up auth
+        run: |
+          git config --global http.https://github.com/.extraheader "Authorization: Basic $(echo -n "${{ secrets.GENERATOR_GITHUB_ACTOR }}:${{ secrets.GENERATOR_PAT }}" | base64 --wrap=0)"
+      - name: Checkout source
+        run: |
+          git version
+          git clone -b master --depth 1 https://github.com/${{ secrets.GENERATOR_SOURCE }} $GITHUB_WORKSPACE
+          git config --local gc.auto 0
+      - name: Checkout submodules
+        run: |
+          git submodule sync --recursive
+          &>/dev/null git -c protocol.version=2 submodule update --init --force --depth=1 --recursive
+      - name: Removing auth
+        run: |
+          git config --global --unset-all 'http.https://github.com/.extraheader'
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v2
+        with:
+          hugo-version: ${{ secrets.HUGO_VERSION }}
+          extended: true
+      - name: Build
+        run: hugo ${{ secrets.HUGO_ARGS }}
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          deploy_key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          external_repository: ${{ secrets.ACTIONS_EXTERNAL_REPOSITORY }}
+          publish_dir: ./public
+          cname: xiaomirom.com
+          publish_branch: master
+          force_orphan: true
+          user_name: "github-actions"
+          user_email: "github-actions@users.noreply.github.com"
+      - name: Log version
+        run: |
+          rm ./* -rf
+          mkdir public
+          date "+%d.%m.%Y %H:%M:%S" > public/version
+      - name: Deploy log
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: master
+          force_orphan: true
+          user_name: "github-actions"
+          user_email: "github-actions@users.noreply.github.com"
+      # - name: Notify
+      #   run: |
+      #     ${{ secrets.BUILT_NOTIFY_ACTIONS }}
+      - name: Notify
+        uses: nick-invision/retry@v2
+        with:
+          timeout_seconds: 15
+          max_attempts: 3
+          # retry_on: error
+          command: while IFS= read -r act ; do &>/dev/null bash -c "$act && action"; [ $? -eq 0 ] || exit 1; done <<< "${{ secrets.BUILT_NOTIFY_ACTIONS }}"
