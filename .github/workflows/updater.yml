@@ -1,0 +1,90 @@
+name: Updater
+
+on:
+  push:
+    branches: [updater]
+  pull_request:
+    branches: [updater]
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+
+    steps:
+      # - uses: actions/checkout@v2
+      #   with:
+      #     persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal token
+      #     #fetch-depth: 0 # otherwise, you will failed to push refs to dest repo
+      #     fetch-depth: 1
+      #     repository: ${{ secrets.UPDATER_SOURCE }}
+      #     token: ${{ secrets.UPDATER_PAT }}
+      #     ref: master
+      #     #submodules: recursive
+      - name: Set up auth
+        run: |
+          git config --global http.https://github.com/.extraheader "Authorization: Basic $(echo -n "${{ secrets.UPDATER_GITHUB_ACTOR }}:${{ secrets.UPDATER_PAT }}" | base64 --wrap=0)"
+      - name: Checkout source
+        run: |
+          git version
+          git clone -b master --depth 1 https://github.com/${{ secrets.UPDATER_SOURCE }} $GITHUB_WORKSPACE
+          git config --local gc.auto 0
+      - name: Checkout submodules
+        run: |
+          git submodule sync --recursive
+          &>/dev/null git -c protocol.version=2 submodule update --init --force --depth=1 --recursive
+      - name: Removing auth
+        run: |
+          git config --global --unset-all 'http.https://github.com/.extraheader'
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.7.x"
+      - uses: actions/cache@v2
+        id: cache
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      # Remove apt repos that are known to break from time to time
+      # See https://github.com/actions/virtual-environments/issues/323
+      - name: Remove broken apt repos [Ubuntu]
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          for apt_file in `grep -lr microsoft /etc/apt/sources.list.d/`; do sudo rm $apt_file; done
+      - name: Install dependencies
+        # if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyaml-dev
+          &>/dev/null python -m pip install -r requirements.txt
+      - name: Main
+        env:
+            PAT: ${{ secrets.UPDATER_PAT }}
+        run: |
+          while IFS= read -r action ; do &>/dev/null $action; [ $? -eq 0 ] || exit 1; done <<< "${{ secrets.UPDATER_ACTIONS }}"
+      - name: Commit files
+        id: commit
+        run: |
+          git config --local user.email "xiaomirom-site-action@users.noreply.github.com"
+          git config --local user.name "xiaomirom-site Github Action Bot"
+          git add data/
+          &>/dev/null git commit -m "Sync: $(date +%d.%m.%Y)" && echo "::set-output name=committed::1" || echo "Nothing to update"
+      - name: Push changes
+        run: |
+          git push "https://${{ secrets.UPDATER_GITHUB_ACTOR }}:${{ secrets.UPDATER_PAT }}@github.com/${{ secrets.UPDATER_SOURCE }}.git" HEAD:master
+      - name: Notify generator
+        # Being pushed and pull request merged may contain site related changes, just rebuild the site always
+        if: ${{ steps.commit.outputs.committed == '1' }}
+        run: |
+          curl -X POST -Ss https://api.github.com/repos/${{ github.repository }}/actions/workflows/generator.yml/dispatches \
+          -H 'Accept: application/vnd.github.v3+json' \
+          -H 'Authorization: token ${{ secrets.PAT }}' \
+          --data '{"ref": "generator"}'
